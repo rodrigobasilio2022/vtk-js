@@ -36,6 +36,9 @@ import { registerOverride } from 'vtk.js/Sources/Rendering/OpenGL/ViewNodeFactor
 
 const { vtkWarningMacro, vtkErrorMacro } = macro;
 
+// Match the VolumePicker example threshold used by downstream apps.
+const HARDWARE_SELECTOR_OPACITY_THRESHOLD = 0.0001;
+
 // ----------------------------------------------------------------------------
 // helper methods
 // ----------------------------------------------------------------------------
@@ -146,6 +149,45 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       const zbt = renderPass.getZBufferTexture();
       if (zbt !== model.zBufferTexture) {
         model.zBufferTexture = zbt;
+      }
+
+      // HardwareSelector captures Z values from the ForwardPass zBufferTexture,
+      // which normally contains only geometry depth. For volume selection we
+      // need a depth value that corresponds to the first opacity-threshold hit.
+      // During selection's ACTOR_PASS with Z capture enabled, render a depth-only
+      // volume pass into the zBufferTexture.
+      const openGLRenderer =
+        publicAPI.getFirstAncestorOfType('vtkOpenGLRenderer');
+      const selector = openGLRenderer?.getSelector?.();
+      if (selector?.getCaptureZValues?.() && selector.getCurrentPass() === 0) {
+        // Setup minimal state needed to render
+        model._openGLRenderWindow = publicAPI.getLastAncestorOfType(
+          'vtkOpenGLRenderWindow'
+        );
+        model._openGLRenderer = openGLRenderer;
+        model.context = model._openGLRenderWindow.getContext();
+        model.tris.setOpenGLRenderWindow(model._openGLRenderWindow);
+        model.jitterTexture.setOpenGLRenderWindow(model._openGLRenderWindow);
+        model.framebuffer.setOpenGLRenderWindow(model._openGLRenderWindow);
+
+        model.openGLVolume =
+          publicAPI.getFirstAncestorOfType('vtkOpenGLVolume');
+        const actor = model.openGLVolume.getRenderable();
+        const ren = model._openGLRenderer.getRenderable();
+        model.openGLCamera = model._openGLRenderer.getViewNodeFor(
+          ren.getActiveCamera()
+        );
+
+        // Avoid sampling the same zBufferTexture we are rendering into.
+        const savedZBufferTexture = model.zBufferTexture;
+        model.zBufferTexture = null;
+
+        model.haveSeenDepthRequest = true;
+        model.renderDepth = true;
+        publicAPI.renderPiece(ren, actor);
+        model.renderDepth = false;
+
+        model.zBufferTexture = savedZBufferTexture;
       }
     }
   };
@@ -401,6 +443,136 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       '//VTK::BlendMode',
       `${model.renderable.getBlendMode()}`
     ).result;
+
+    const selectorActive = !!model._openGLRenderer?.getSelector?.();
+
+    // ---------------------------------------------------------------------
+    // HardwareSelector picking support
+    //
+    // Inject the picking implementation only when a selector pass is active.
+    // This avoids bloating the standard volume fragment shader (and potential
+    // driver compilation failures) during normal rendering.
+    // ---------------------------------------------------------------------
+    if (selectorActive) {
+      FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Dec', [
+        'uniform int picking;',
+        'uniform int pickingPass;',
+        'uniform int depthRequest;',
+        'uniform vec3 mapperIndex;',
+        'uniform float opacityThreshold;',
+        '',
+        'vec4 getColorAtPos(vec3 posIS);',
+        '',
+        'float vtkFirstHitDistance(vec3 startIS, vec3 endIS) {',
+        '  vec3 delta = endIS - startIS;',
+        '  float dist = length(delta);',
+        '  vec3 stepIS = normalize(delta) * sampleDistanceIS;',
+        '  float raySteps = dist / sampleDistanceIS;',
+        '  float jitter = 0.01;',
+        '',
+        '  vec3 firstPosIS = startIS;',
+        '  vec4 firstColor = getColorAtPos(firstPosIS);',
+        '',
+        '  // handle very thin volumes',
+        '  if (raySteps <= 1.0) {',
+        '    float a = 1.0 - pow(1.0 - firstColor.a, raySteps);',
+        '    return a > opacityThreshold ? 0.0 : -1.0;',
+        '  }',
+        '',
+        '  // first sample only counts for `jitter` factor of the step',
+        '  float accumA = 1.0 - pow(1.0 - firstColor.a, jitter);',
+        '  if (accumA > opacityThreshold) {',
+        '    return 0.0;',
+        '  }',
+        '',
+        '  vec3 posIS = firstPosIS + jitter * stepIS;',
+        '  float stepsTraveled = jitter;',
+        '',
+        '  for (int i = 0; i < vtkMaximumNumberOfSamples; ++i) {',
+        '    if (stepsTraveled + 1.0 >= raySteps) {',
+        '      break;',
+        '    }',
+        '    vec4 tColor = getColorAtPos(posIS);',
+        '    accumA = accumA + tColor.a * (1.0 - accumA);',
+        '    if (accumA > opacityThreshold) {',
+        '      return stepsTraveled * sampleDistanceIS;',
+        '    }',
+        '    stepsTraveled += 1.0;',
+        '    posIS += stepIS;',
+        '    if (accumA > 0.99) {',
+        '      break;',
+        '    }',
+        '  }',
+        '',
+        '  // last sample contribution at endIS',
+        '  float remainingSteps = raySteps - stepsTraveled;',
+        '  if (remainingSteps > 0.0) {',
+        '    vec4 endColor = getColorAtPos(endIS);',
+        '    float aEnd = 1.0 - pow(1.0 - endColor.a, remainingSteps);',
+        '    accumA = accumA + aEnd * (1.0 - accumA);',
+        '    if (accumA > opacityThreshold) {',
+        '      return dist;',
+        '    }',
+        '  }',
+        '',
+        '  return -1.0;',
+        '}',
+        '',
+        'float vtkComputeDepthFromPosIS(vec3 posIS) {',
+        '  vec3 posVC = posIS * vSpacing + vOriginVC;',
+        '  if (cameraParallel == 1) {',
+        '    float denom = (camFar - camNear);',
+        '    if (denom <= 0.0) return gl_FragCoord.z;',
+        '    return clamp(((-posVC.z) - camNear) / denom, 0.0, 1.0);',
+        '  }',
+        '  float z = posVC.z;',
+        '  float A = (camFar + camNear) / (camNear - camFar);',
+        '  float B = (2.0 * camFar * camNear) / (camNear - camFar);',
+        '  float ndcZ = (A * z + B) / (-z);',
+        '  return clamp(ndcZ * 0.5 + 0.5, 0.0, 1.0);',
+        '}',
+        '',
+        '//VTK::Picking::Dec',
+      ]).result;
+
+      FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Impl', [
+        'if (depthRequest == 1) {',
+        '  float hitDistance = vtkFirstHitDistance(posIS, endIS);',
+        '  float depth = 1.0;',
+        '  if (hitDistance >= 0.0) {',
+        '    vec3 hitPosIS = posIS + normalize(endIS - posIS) * hitDistance;',
+        '    depth = vtkComputeDepthFromPosIS(hitPosIS);',
+        '  }',
+        '  float iz = floor(depth * 65535.0 + 0.1);',
+        '  float rf = floor(iz / 256.0) / 255.0;',
+        '  float gf = mod(iz, 256.0) / 255.0;',
+        '  gl_FragData[0] = vec4(rf, gf, 0.0, 1.0);',
+        '  return;',
+        '}',
+        'if (picking != 0) {',
+        '  // Volumes do not provide point/cell ids for hardware selection.',
+        '  // Make ID passes a miss so HardwareSelector ignores attribute ids.',
+        '  if (pickingPass == 2 || pickingPass == 3) {',
+        '    gl_FragData[0] = vec4(0.0, 0.0, 0.0, 1.0);',
+        '    return;',
+        '  }',
+        '  float hitDistance = vtkFirstHitDistance(posIS, endIS);',
+        '  if (hitDistance < 0.0) {',
+        '    discard;',
+        '  }',
+        '  vec3 hitPosIS = posIS + normalize(endIS - posIS) * hitDistance;',
+        '  float depth = vtkComputeDepthFromPosIS(hitPosIS);',
+        '#if __VERSION__ >= 300',
+        '  gl_FragDepth = depth;',
+        '#elif defined(GL_EXT_frag_depth)',
+        '  gl_FragDepthEXT = depth;',
+        '#endif',
+        '  gl_FragData[0] = vec4(mapperIndex, 1.0);',
+        '  return;',
+        '}',
+        '//VTK::Picking::Impl',
+      ]).result;
+    }
 
     shaders.Fragment = FSSource;
 
@@ -668,6 +840,10 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.setMapperShaderParameters = (cellBO, ren, actor) => {
     // Now to update the VAO too, if necessary.
     const program = cellBO.getProgram();
+
+    if (!program) {
+      return;
+    }
 
     if (
       cellBO.getCABO().getElementCount() &&
@@ -1263,17 +1439,39 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   };
 
   publicAPI.renderPieceStart = (ren, actor) => {
+    const selector = model._openGLRenderer?.getSelector?.();
+    if (selector && !model.renderDepth) {
+      // Register this prop with the selector and update its per-pass color.
+      selector.renderProp(actor);
+
+      // During hardware selection, the ForwardPass zBufferTexture may be
+      // populated (including by our own depth-only path). The volume mapper's
+      // intermixing logic uses that texture to clamp ray length, which can
+      // cause the volume to clip itself away in selection passes. Disable
+      // zBufferTexture usage while selecting so the ID pass can render.
+      if (model.zBufferTexture !== null) {
+        model._savedZBufferTextureForSelection = model.zBufferTexture;
+        model.zBufferTexture = null;
+      }
+    }
+
     const rwi = ren.getVTKWindow().getInteractor();
 
     if (!model._lastScale) {
       model._lastScale = model.renderable.getInitialInteractionScale();
     }
     model._useSmallViewport = false;
-    if (rwi.isAnimating() && model._lastScale > 1.5) {
+    if (rwi && rwi.isAnimating() && model._lastScale > 1.5) {
       model._useSmallViewport = true;
     }
 
-    if (!model._animationRateSubscription) {
+    // Never use the small-viewport optimization when selecting: selection
+    // relies on correct pixel->framebuffer mapping and a depth buffer.
+    if (selector) {
+      model._useSmallViewport = false;
+    }
+
+    if (rwi && !model._animationRateSubscription) {
       // when the animation frame rate changes recompute the scale factor
       model._animationRateSubscription = rwi.onAnimationFrameRateUpdate(() => {
         if (model.renderable.getAutoAdjustSampleDistances()) {
@@ -1302,7 +1500,7 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     }
 
     // use/create/resize framebuffer if needed
-    if (model._useSmallViewport) {
+    if (model._useSmallViewport && !model.renderDepth) {
       const size = model._openGLRenderWindow.getFramebufferSize();
       const scaleFactor = 1 / Math.sqrt(model._lastScale);
       model._smallViewportWidth = Math.ceil(scaleFactor * size[0]);
@@ -1338,7 +1536,16 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         model._smallViewportHeight / size[1],
       ];
     }
-    model.context.disable(model.context.DEPTH_TEST);
+
+    // Volume rendering normally disables depth testing and uses zBufferTexture
+    // for intermixing. For hardware selection we want a real depth buffer.
+    if (selector) {
+      model.context.enable(model.context.DEPTH_TEST);
+      model.context.depthMask(true);
+      model.context.depthFunc(model.context.LEQUAL);
+    } else {
+      model.context.disable(model.context.DEPTH_TEST);
+    }
 
     // make sure the BOs are up to date
     publicAPI.updateBufferObjects(ren, actor);
@@ -1389,6 +1596,11 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     // if we have a zbuffer texture then deactivate it
     if (model.zBufferTexture !== null) {
       model.zBufferTexture.deactivate();
+    }
+
+    if (model._savedZBufferTextureForSelection) {
+      model.zBufferTexture = model._savedZBufferTextureForSelection;
+      model._savedZBufferTextureForSelection = null;
     }
 
     if (model._useSmallViewport) {
@@ -1943,6 +2155,9 @@ const DEFAULT_VALUES = {
   targetXYF: 1.0,
   zBufferTexture: null,
   lastZBufferTexture: null,
+  haveSeenDepthRequest: false,
+  renderDepth: false,
+  _savedZBufferTextureForSelection: null,
   lightComplexity: 0,
   fullViewportTime: 1.0,
   idxToView: null,

@@ -993,7 +993,13 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
       ).result;
       FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::ZBuffer::Impl', [
         'if (depthRequest == 1) {',
-        'float iz = floor(gl_FragCoord.z*65535.0 + 0.1);',
+        '#ifdef VTK_COINCIDENT_OFFSET',
+        '  float cvalue = 0.0;',
+        '  //VTK::Coincident::Impl',
+        '#else',
+        '  float cvalue = 0.0;',
+        '#endif',
+        'float iz = floor((gl_FragCoord.z + cvalue)*65535.0 + 0.1);',
         'float rf = floor(iz/256.0)/255.0;',
         'float gf = mod(iz,256.0)/255.0;',
         'gl_FragData[0] = vec4(rf, gf, 0.0, 1.0); }',
