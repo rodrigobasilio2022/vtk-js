@@ -927,6 +927,25 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       program.setUniformf('vpZWidth', size[0]);
       program.setUniformf('vpZHeight', size[1]);
     }
+
+    // Hardware selector picking uniforms
+    const selector = model._openGLRenderer?.getSelector?.();
+    if (selector) {
+      const id = publicAPI.convertIDToColor(selector.getPropColorValue());
+      program.setUniformi('picking', selector.getCurrentPass() >= 0 ? 1 : 0);
+      program.setUniformi('pickingPass', selector.getCurrentPass());
+      program.setUniformi('depthRequest', model.renderDepth ? 1 : 0);
+      program.setUniform3f(
+        'mapperIndex',
+        id[0] / 255.0,
+        id[1] / 255.0,
+        id[2] / 255.0
+      );
+      program.setUniformf(
+        'opacityThreshold',
+        HARDWARE_SELECTOR_OPACITY_THRESHOLD
+      );
+    }
   };
 
   publicAPI.setCameraShaderParameters = (cellBO, ren, actor) => {
