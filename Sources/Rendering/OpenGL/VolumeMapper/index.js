@@ -354,12 +354,6 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     const maxSamples =
       vec3.length(vsize) / publicAPI.getCurrentSampleDistance(ren);
 
-    FSSource = vtkShaderProgram.substitute(
-      FSSource,
-      '//VTK::MaximumSamplesValue',
-      `${Math.ceil(maxSamples)}`
-    ).result;
-
     // set light complexity
     FSSource = vtkShaderProgram.substitute(
       FSSource,
@@ -577,6 +571,12 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         '//VTK::Picking::Impl',
       ]).result;
     }
+
+    FSSource = vtkShaderProgram.substitute(
+      FSSource,
+      '//VTK::MaximumSamplesValue',
+      `${Math.ceil(maxSamples)}`
+    ).result;
 
     shaders.Fragment = FSSource;
 
@@ -950,7 +950,15 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     }
 
     // Hardware selector picking uniforms
-    const selector = model._openGLRenderer?.getSelector?.();
+    let openGLRenderer = model._openGLRenderer;
+    if (!openGLRenderer) {
+      if (ren.getSelector) {
+        openGLRenderer = ren;
+      } else if (model._openGLRenderWindow) {
+        openGLRenderer = model._openGLRenderWindow.getViewNodeFor(ren);
+      }
+    }
+    const selector = openGLRenderer?.getSelector?.();
     if (selector) {
       const propColorValue = selector.getPropColorValue();
       const pickingPass = selector.getCurrentPass();
@@ -1491,7 +1499,15 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   };
 
   publicAPI.renderPieceStart = (ren, actor) => {
-    const selector = model._openGLRenderer?.getSelector?.();
+    let openGLRenderer = model._openGLRenderer;
+    if (!openGLRenderer) {
+      if (ren.getSelector) {
+        openGLRenderer = ren;
+      } else if (model._openGLRenderWindow) {
+        openGLRenderer = model._openGLRenderWindow.getViewNodeFor(ren);
+      }
+    }
+    const selector = openGLRenderer?.getSelector?.();
     const picking = selector
       ? selector.getCurrentPass()
       : PassTypes.MIN_KNOWN_PASS - 1;

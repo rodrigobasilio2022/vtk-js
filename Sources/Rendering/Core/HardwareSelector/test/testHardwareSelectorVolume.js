@@ -96,7 +96,7 @@ test.onlyIfWebGL('Test HardwareSelector Volume', (tapeContext) => {
           }
         }
       }
-      tapeContext.ok(anyNonBlack, 'ACTOR_PASS contains a hit');
+      tapeContext.ok(anyNonBlack, 'ACTOR_PASS not contains a hit');
 
       const res = src ? src.generateSelection(x1, y1, x2, y2) : [];
 
@@ -108,8 +108,8 @@ test.onlyIfWebGL('Test HardwareSelector Volume', (tapeContext) => {
         (node) => node.getProperties().prop === volume
       );
 
-      tapeContext.ok(nodes.length >= 1, 'Selected at least one prop');
-      tapeContext.ok(!!volumeNode, 'Volume is present in selection');
+      tapeContext.ok(nodes.length >= 1, 'No prop selected');
+      tapeContext.ok(!!volumeNode, 'Volume is not present in selection');
 
       if (!volumeNode) {
         return;
