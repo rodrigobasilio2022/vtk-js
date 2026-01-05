@@ -241,6 +241,9 @@ uniform vec4 ipScalarRangeMax;
 // declaration for intermixed geometry
 //VTK::ZBuffer::Dec
 
+// hardware selector picking support
+//VTK::Picking::Dec
+
 //=======================================================================
 // global and custom variables (a temporary section before photorealistics rendering module is complete)
 vec3 rayDirVC;
@@ -1935,6 +1938,8 @@ void main()
   vec3 posIS;
   vec3 endIS;
   computeIndexSpaceValues(posIS, endIS, rayDirVC, rayStartEndDistancesVC);
+
+  //VTK::Picking::Impl
 
   // Perform the blending operation along the ray
   applyBlend(posIS, endIS, tdims);
