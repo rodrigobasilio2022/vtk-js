@@ -79,6 +79,8 @@ module.exports = function init(config) {
       outputDir: 'Utilities/TestResults',
       // Keep this defined to avoid reporter edge-cases.
       properties: {},
+      // Use the newer schema to avoid embedding raw browser logs into XML.
+      xmlVersion: 1,
     },
 
     client: {

@@ -33,6 +33,7 @@ import vtkVolumeVS from 'vtk.js/Sources/Rendering/OpenGL/glsl/vtkVolumeVS.glsl';
 import vtkVolumeFS from 'vtk.js/Sources/Rendering/OpenGL/glsl/vtkVolumeFS.glsl';
 
 import { registerOverride } from 'vtk.js/Sources/Rendering/OpenGL/ViewNodeFactory';
+import { PassTypes } from 'vtk.js/Sources/Rendering/OpenGL/HardwareSelector/Constants';
 
 const { vtkWarningMacro, vtkErrorMacro } = macro;
 
@@ -461,41 +462,48 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         'uniform vec3 mapperIndex;',
         'uniform float opacityThreshold;',
         '',
-        'vec4 getColorAtPos(vec3 posIS);',
+        '// Forward declare shader helpers used by selection code.',
+        'vec4 getColorForValue(vec4 tValue, vec3 posIS, vec3 tstep);',
+        'vec4 getTextureValue(vec3 pos);',
         '',
-        'float vtkFirstHitDistance(vec3 startIS, vec3 endIS) {',
+        'float vtkFirstHitDistance(vec3 startIS, vec3 endIS, vec3 tdims, float sampleDistIS) {',
+        '  vec3 tstep = 1.0 / tdims;',
         '  vec3 delta = endIS - startIS;',
         '  float dist = length(delta);',
-        '  vec3 stepIS = normalize(delta) * sampleDistanceIS;',
-        '  float raySteps = dist / sampleDistanceIS;',
-        '  float jitter = 0.01;',
+        '  vec3 stepIS = normalize(delta) * sampleDistIS;',
+        '  float raySteps = dist / sampleDistIS;',
         '',
-        '  vec3 firstPosIS = startIS;',
-        '  vec4 firstColor = getColorAtPos(firstPosIS);',
+        '  // Match the jitter used by applyBlend().',
+        '  float jitter = 0.01 + 0.99 * texture2D(jtexture, gl_FragCoord.xy / 32.0).r;',
+        '',
+        '  vec3 posIS = startIS;',
+        '  vec4 tValue = getTextureValue(posIS);',
+        '  float opacity = getColorForValue(tValue, posIS, tstep).a;',
         '',
         '  // handle very thin volumes',
         '  if (raySteps <= 1.0) {',
-        '    float a = 1.0 - pow(1.0 - firstColor.a, raySteps);',
+        '    float a = 1.0 - pow(1.0 - opacity, raySteps);',
         '    return a > opacityThreshold ? 0.0 : -1.0;',
         '  }',
         '',
         '  // first sample only counts for `jitter` factor of the step',
-        '  float accumA = 1.0 - pow(1.0 - firstColor.a, jitter);',
+        '  float accumA = 1.0 - pow(1.0 - opacity, jitter);',
         '  if (accumA > opacityThreshold) {',
         '    return 0.0;',
         '  }',
         '',
-        '  vec3 posIS = firstPosIS + jitter * stepIS;',
+        '  posIS += jitter * stepIS;',
         '  float stepsTraveled = jitter;',
         '',
-        '  for (int i = 0; i < vtkMaximumNumberOfSamples; ++i) {',
+        '  for (int i = 0; i < //VTK::MaximumSamplesValue ; ++i) {',
         '    if (stepsTraveled + 1.0 >= raySteps) {',
         '      break;',
         '    }',
-        '    vec4 tColor = getColorAtPos(posIS);',
-        '    accumA = accumA + tColor.a * (1.0 - accumA);',
+        '    tValue = getTextureValue(posIS);',
+        '    opacity = getColorForValue(tValue, posIS, tstep).a;',
+        '    accumA = accumA + opacity * (1.0 - accumA);',
         '    if (accumA > opacityThreshold) {',
-        '      return stepsTraveled * sampleDistanceIS;',
+        '      return stepsTraveled * sampleDistIS;',
         '    }',
         '    stepsTraveled += 1.0;',
         '    posIS += stepIS;',
@@ -504,12 +512,12 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         '    }',
         '  }',
         '',
-        '  // last sample contribution at endIS',
-        '  float remainingSteps = raySteps - stepsTraveled;',
-        '  if (remainingSteps > 0.0) {',
-        '    vec4 endColor = getColorAtPos(endIS);',
-        '    float aEnd = 1.0 - pow(1.0 - endColor.a, remainingSteps);',
-        '    accumA = accumA + aEnd * (1.0 - accumA);',
+        '  if (accumA < 0.99 && (raySteps - stepsTraveled) > 0.0) {',
+        '    posIS = endIS;',
+        '    tValue = getTextureValue(posIS);',
+        '    opacity = getColorForValue(tValue, posIS, tstep).a;',
+        '    opacity = 1.0 - pow(1.0 - opacity, raySteps - stepsTraveled);',
+        '    accumA = accumA + opacity * (1.0 - accumA);',
         '    if (accumA > opacityThreshold) {',
         '      return dist;',
         '    }',
@@ -519,7 +527,11 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         '}',
         '',
         'float vtkComputeDepthFromPosIS(vec3 posIS) {',
-        '  vec3 posVC = posIS * vSpacing + vOriginVC;',
+        '  // posIS is in the volume index-space basis. Convert to view coords.',
+        '  vec3 posVC = vOriginVC',
+        '    + vPlaneNormal0 * (posIS.x * vSpacing.x)',
+        '    + vPlaneNormal2 * (posIS.y * vSpacing.y)',
+        '    + vPlaneNormal4 * (posIS.z * vSpacing.z);',
         '  if (cameraParallel == 1) {',
         '    float denom = (camFar - camNear);',
         '    if (denom <= 0.0) return gl_FragCoord.z;',
@@ -537,7 +549,7 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
 
       FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Impl', [
         'if (depthRequest == 1) {',
-        '  float hitDistance = vtkFirstHitDistance(posIS, endIS);',
+        '  float hitDistance = vtkFirstHitDistance(posIS, endIS, tdims, sampleDistanceIS);',
         '  float depth = 1.0;',
         '  if (hitDistance >= 0.0) {',
         '    vec3 hitPosIS = posIS + normalize(endIS - posIS) * hitDistance;',
@@ -550,24 +562,16 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         '  return;',
         '}',
         'if (picking != 0) {',
-        '  // Volumes do not provide point/cell ids for hardware selection.',
-        '  // Make ID passes a miss so HardwareSelector ignores attribute ids.',
-        '  if (pickingPass == 2 || pickingPass == 3) {',
-        '    gl_FragData[0] = vec4(0.0, 0.0, 0.0, 1.0);',
+        '  // ACTOR_PASS: write the prop id color for any fragment covered by the',
+        '  // volume proxy geometry. We intentionally do not discard based on',
+        '  // opacity here; Z values (when requested) are handled by depthRequest.',
+        '  if (pickingPass == 0) {',
+        '    gl_FragData[0] = vec4(mapperIndex, 1.0);',
         '    return;',
         '  }',
-        '  float hitDistance = vtkFirstHitDistance(posIS, endIS);',
-        '  if (hitDistance < 0.0) {',
-        '    discard;',
-        '  }',
-        '  vec3 hitPosIS = posIS + normalize(endIS - posIS) * hitDistance;',
-        '  float depth = vtkComputeDepthFromPosIS(hitPosIS);',
-        '#if __VERSION__ >= 300',
-        '  gl_FragDepth = depth;',
-        '#elif defined(GL_EXT_frag_depth)',
-        '  gl_FragDepthEXT = depth;',
-        '#endif',
-        '  gl_FragData[0] = vec4(mapperIndex, 1.0);',
+        '  // Volumes do not provide point/cell ids for hardware selection.',
+        '  // Make non-ACTOR passes a miss so HardwareSelector ignores attribute ids.',
+        '  gl_FragData[0] = vec4(0.0, 0.0, 0.0, 1.0);',
         '  return;',
         '}',
         '//VTK::Picking::Impl',
@@ -745,6 +749,11 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.getNeedToRebuildShaders = (cellBO, ren, actor) => {
     const actorProps = actor.getProperty();
 
+    // If there is no shader program (e.g. compilation failed), force a rebuild.
+    if (!cellBO.getProgram()) {
+      return true;
+    }
+
     recomputeLightComplexity(actor, ren.getLights());
 
     const numComp = model.scalarTexture.getComponents();
@@ -791,6 +800,8 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       cellBO.getProgram()?.getHandle() === 0 ||
       cellBO.getShaderSourceTime().getMTime() < publicAPI.getMTime() ||
       cellBO.getShaderSourceTime().getMTime() < model.renderable.getMTime() ||
+      cellBO.getShaderSourceTime().getMTime() <
+        model.selectionStateChanged.getMTime() ||
       !model.previousState ||
       !DeepEqual(model.previousState, state)
     ) {
@@ -816,6 +827,12 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
           shaders.Geometry
         );
 
+      // Compilation/link can fail and return null. In that case, bail out early
+      // so we don't attempt to set uniforms on a missing program.
+      if (!newShader) {
+        return;
+      }
+
       // if the shader changed reinitialize the VAO
       if (newShader !== cellBO.getProgram()) {
         cellBO.setProgram(newShader);
@@ -828,6 +845,10 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       model._openGLRenderWindow
         .getShaderCache()
         .readyShaderProgram(cellBO.getProgram());
+    }
+
+    if (!cellBO.getProgram()) {
+      return;
     }
 
     cellBO.getVAO().bind();
@@ -931,15 +952,16 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     // Hardware selector picking uniforms
     const selector = model._openGLRenderer?.getSelector?.();
     if (selector) {
-      const id = publicAPI.convertIDToColor(selector.getPropColorValue());
-      program.setUniformi('picking', selector.getCurrentPass() >= 0 ? 1 : 0);
-      program.setUniformi('pickingPass', selector.getCurrentPass());
+      const propColorValue = selector.getPropColorValue();
+      const pickingPass = selector.getCurrentPass();
+      program.setUniformi('picking', pickingPass >= 0 ? 1 : 0);
+      program.setUniformi('pickingPass', pickingPass);
       program.setUniformi('depthRequest', model.renderDepth ? 1 : 0);
       program.setUniform3f(
         'mapperIndex',
-        id[0] / 255.0,
-        id[1] / 255.0,
-        id[2] / 255.0
+        propColorValue[0],
+        propColorValue[1],
+        propColorValue[2]
       );
       program.setUniformf(
         'opacityThreshold',
@@ -957,6 +979,9 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     mat4.multiply(model.modelToView, keyMats.wcvc, actMats.mcwc);
 
     const program = cellBO.getProgram();
+    if (!program) {
+      return;
+    }
 
     const cam = model.openGLCamera.getRenderable();
     const crange = cam.getClippingRange();
@@ -1266,6 +1291,10 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.setPropertyShaderParameters = (cellBO, ren, actor) => {
     const program = cellBO.getProgram();
 
+    if (!program) {
+      return;
+    }
+
     program.setUniformi('ctexture', model.colorTexture.getTextureUnit());
     program.setUniformi('otexture', model.opacityTexture.getTextureUnit());
     program.setUniformi('jtexture', model.jitterTexture.getTextureUnit());
@@ -1375,6 +1404,11 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   };
 
   publicAPI.getClippingPlaneShaderParameters = (cellBO, ren, actor) => {
+    const program = cellBO.getProgram();
+    if (!program) {
+      return;
+    }
+
     if (model.renderable.getClippingPlanes().length > 0) {
       const keyMats = model.openGLCamera.getKeyMatrices(ren);
 
@@ -1406,7 +1440,6 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         clipPlaneOrigins.push(clipPlanePos[1]);
         clipPlaneOrigins.push(clipPlanePos[2]);
       }
-      const program = cellBO.getProgram();
       program.setUniform3fv(`vClipPlaneNormals`, clipPlaneNormals);
       program.setUniformfv(`vClipPlaneDistances`, clipPlaneDistances);
       program.setUniform3fv(`vClipPlaneOrigins`, clipPlaneOrigins);
@@ -1450,7 +1483,7 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.getCurrentSampleDistance = (ren) => {
     const rwi = ren.getVTKWindow().getInteractor();
     const baseSampleDistance = model.renderable.getSampleDistance();
-    if (rwi.isAnimating()) {
+    if (rwi && rwi.isAnimating()) {
       const factor = model.renderable.getInteractionSampleDistanceFactor();
       return baseSampleDistance * factor;
     }
@@ -1459,6 +1492,13 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
 
   publicAPI.renderPieceStart = (ren, actor) => {
     const selector = model._openGLRenderer?.getSelector?.();
+    const picking = selector
+      ? selector.getCurrentPass()
+      : PassTypes.MIN_KNOWN_PASS - 1;
+    if (model.lastSelectionState !== picking) {
+      model.selectionStateChanged.modified();
+      model.lastSelectionState = picking;
+    }
     if (selector && !model.renderDepth) {
       // Register this prop with the selector and update its per-pass color.
       selector.renderProp(actor);
@@ -2176,6 +2216,8 @@ const DEFAULT_VALUES = {
   lastZBufferTexture: null,
   haveSeenDepthRequest: false,
   renderDepth: false,
+  lastSelectionState: PassTypes.MIN_KNOWN_PASS - 1,
+  selectionStateChanged: null,
   _savedZBufferTextureForSelection: null,
   lightComplexity: 0,
   fullViewportTime: 1.0,
@@ -2207,6 +2249,9 @@ export function extend(publicAPI, model, initialValues = {}) {
 
   model.VBOBuildTime = {};
   macro.obj(model.VBOBuildTime, { mtime: 0 });
+
+  model.selectionStateChanged = {};
+  macro.obj(model.selectionStateChanged, { mtime: 0 });
 
   model.tris = vtkHelper.newInstance();
   model.jitterTexture = vtkOpenGLTexture.newInstance();

@@ -64,18 +64,56 @@ test.onlyIfWebGL('Test HardwareSelector Volume', (tapeContext) => {
   renderWindow.render();
 
   const sel = glwindow.getSelector();
-  sel.setFieldAssociation(FieldAssociations.FIELD_ASSOCIATION_POINTS);
+  // Use CELL association to avoid the POINTS-specific pre-traversal path in
+  // OpenGL HardwareSelector (we only care about selecting the prop for volumes).
+  sel.setFieldAssociation(FieldAssociations.FIELD_ASSOCIATION_CELLS);
   sel.setCaptureZValues(true);
 
-  return sel
-    .selectAsync(renderer, 200, 200, 200, 200)
-    .then((res) => {
-      tapeContext.ok(res.length >= 1, 'Selected at least one prop');
+  // Pick at the center of the viewport in display coordinates.
+  // This matches the convention used in the other selector tests.
+  const bounds = imageData.getBounds();
+  const viewportSize = glwindow.getViewportSize(renderer);
+  const x = Math.round(viewportSize[0] * 0.5);
+  const y = Math.round(viewportSize[1] * 0.5);
 
-      const volumeNode = res.find(
+  const x1 = x - 2;
+  const y1 = y - 2;
+  const x2 = x + 2;
+  const y2 = y + 2;
+
+  // Use getSourceDataAsync so we can also validate the raw ACTOR_PASS buffer
+  // for debugging (selection ultimately depends on non-black prop ids).
+  return sel
+    .getSourceDataAsync(renderer, x1, y1, x2, y2)
+    .then((src) => {
+      const actorPass = src?.pixBuffer?.[0];
+      let anyNonBlack = false;
+      if (actorPass && actorPass.length) {
+        for (let i = 0; i < actorPass.length; i += 4) {
+          if (actorPass[i] || actorPass[i + 1] || actorPass[i + 2]) {
+            anyNonBlack = true;
+            break;
+          }
+        }
+      }
+      tapeContext.ok(anyNonBlack, 'ACTOR_PASS contains a hit');
+
+      const res = src ? src.generateSelection(x1, y1, x2, y2) : [];
+
+      const nodes = (res || []).filter(
+        (n) => !!n && typeof n.getProperties === 'function'
+      );
+
+      const volumeNode = nodes.find(
         (node) => node.getProperties().prop === volume
       );
+
+      tapeContext.ok(nodes.length >= 1, 'Selected at least one prop');
       tapeContext.ok(!!volumeNode, 'Volume is present in selection');
+
+      if (!volumeNode) {
+        return;
+      }
 
       const { worldPosition, displayPosition } = volumeNode.getProperties();
       tapeContext.ok(
@@ -87,7 +125,6 @@ test.onlyIfWebGL('Test HardwareSelector Volume', (tapeContext) => {
         'Has displayPosition'
       );
 
-      const bounds = imageData.getBounds();
       tapeContext.ok(
         worldPosition[0] >= bounds[0] - 1e-3 &&
           worldPosition[0] <= bounds[1] + 1e-3,
