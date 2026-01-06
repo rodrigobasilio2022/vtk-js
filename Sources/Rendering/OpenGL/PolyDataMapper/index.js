@@ -73,7 +73,7 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
     }
   };
 
-  publicAPI.zBufferPass = (prepass) => {
+  publicAPI.zBufferPass = (prepass, renderPass) => {
     if (prepass) {
       model.haveSeenDepthRequest = true;
       model.renderDepth = true;
@@ -82,7 +82,8 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
     }
   };
 
-  publicAPI.opaqueZBufferPass = (prepass) => publicAPI.zBufferPass(prepass);
+  publicAPI.opaqueZBufferPass = (prepass, renderPass) =>
+    publicAPI.zBufferPass(prepass, renderPass);
 
   publicAPI.opaquePass = (prepass) => {
     if (prepass) {
@@ -902,7 +903,10 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
       selector.getFieldAssociation() ===
         FieldAssociations.FIELD_ASSOCIATION_POINTS
     ) {
-      cp.offset -= 2.0;
+      const picking = getPickState(model._openGLRenderer);
+      if (picking === PassTypes.ID_LOW24 || picking === PassTypes.ID_HIGH24) {
+        cp.offset -= 2.0;
+      }
     }
     return cp;
   };
@@ -1004,10 +1008,11 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
         '#else',
         '  float cvalue = 0.0;',
         '#endif',
-        'float iz = floor((gl_FragCoord.z + cvalue)*65535.0 + 0.1);',
-        'float rf = floor(iz/256.0)/255.0;',
-        'float gf = mod(iz,256.0)/255.0;',
-        'gl_FragData[0] = vec4(rf, gf, 0.0, 1.0); }',
+        'float iz = floor((gl_FragCoord.z + cvalue)*16777215.0 + 0.5);',
+        'float rf = mod(iz,256.0)/255.0;',
+        'float gf = mod(floor(iz/256.0),256.0)/255.0;',
+        'float bf = floor(iz/65536.0)/255.0;',
+        'gl_FragData[0] = vec4(rf, gf, bf, 1.0); }',
       ]).result;
       shaders.Fragment = FSSource;
     }

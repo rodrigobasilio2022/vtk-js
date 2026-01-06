@@ -98,14 +98,25 @@ function getPixelInformationWithData(
     }
     info.compositeID = compositeID - idOffset;
     if (buffdata.captureZValues) {
-      const offset =
-        (displayPosition[1] * (buffdata.area[2] - buffdata.area[0] + 1) +
-          displayPosition[0]) *
-        4;
-      info.zValue =
-        (256 * buffdata.zBuffer[offset] + buffdata.zBuffer[offset + 1]) /
-        65535.0;
-      info.displayPosition = inDisplayPosition;
+      // For volume picking, a pixel may cover proxy geometry but have no
+      // meaningful opacity hit. Those pixels encode alpha=0.
+      const zAlpha = getAlpha(
+        displayPosition[0],
+        displayPosition[1],
+        buffdata.zBuffer,
+        buffdata.area
+      );
+      if (zAlpha !== 0) {
+        // Depth is encoded into RGB as a 24-bit integer (low->high = R,G,B)
+        info.zValue =
+          convert(
+            displayPosition[0],
+            displayPosition[1],
+            buffdata.zBuffer,
+            buffdata.area
+          ) / 16777215.0;
+        info.displayPosition = inDisplayPosition;
+      }
     }
 
     if (buffdata.pixBuffer[PassTypes.ID_LOW24]) {
@@ -251,13 +262,13 @@ function convertSelection(
     child.getProperties().pixelCount = value.pixelCount;
     if (captureZValues) {
       child.getProperties().displayPosition = [
-        value.info.displayPosition[0],
-        value.info.displayPosition[1],
+        value.info.displayPosition[0] + 0.5,
+        value.info.displayPosition[1] + 0.5,
         value.info.zValue,
       ];
       child.getProperties().worldPosition = openGLRenderWindow.displayToWorld(
-        value.info.displayPosition[0],
-        value.info.displayPosition[1],
+        value.info.displayPosition[0] + 0.5,
+        value.info.displayPosition[1] + 0.5,
         value.info.zValue,
         renderer
       );
@@ -716,13 +727,25 @@ function vtkOpenGLHardwareSelector(publicAPI, model) {
       }
       info.compositeID = compositeID - idOffset;
       if (model.captureZValues) {
-        const offset =
-          (displayPosition[1] * (model.area[2] - model.area[0] + 1) +
-            displayPosition[0]) *
-          4;
-        info.zValue =
-          (256 * model.zBuffer[offset] + model.zBuffer[offset + 1]) / 65535.0;
-        info.displayPosition = inDisplayPosition;
+        // For volume picking, a pixel may cover proxy geometry but have no
+        // meaningful opacity hit. Those pixels encode alpha=0.
+        const zAlpha = getAlpha(
+          displayPosition[0],
+          displayPosition[1],
+          model.zBuffer,
+          model.area
+        );
+        if (zAlpha !== 0) {
+          // Depth is encoded into RGB as a 24-bit integer (low->high = R,G,B)
+          info.zValue =
+            convert(
+              displayPosition[0],
+              displayPosition[1],
+              model.zBuffer,
+              model.area
+            ) / 16777215.0;
+          info.displayPosition = inDisplayPosition;
+        }
       }
 
       // Skip attribute ids if alpha is zero (missed)
