@@ -241,9 +241,13 @@ uniform vec4 ipScalarRangeMax;
 // declaration for intermixed geometry
 //VTK::ZBuffer::Dec
 
+// picking support
+//VTK::Picking::Dec
+
 //=======================================================================
 // global and custom variables (a temporary section before photorealistics rendering module is complete)
 vec3 rayDirVC;
+vec2 rayStartEndDistancesVC;
 float sampleDistanceISVS;
 float sampleDistanceIS;
 
@@ -1419,6 +1423,8 @@ bool checkOnEdgeForNeighbor(int i, int j, int s, vec3 stepIS) {
 //
 void applyBlend(vec3 posIS, vec3 endIS, vec3 tdims)
 {
+  //VTK::Picking::Locals
+
   vec3 tstep = 1.0/tdims;
 
   // start slightly inside and apply some jitter
@@ -1593,17 +1599,20 @@ void applyBlend(vec3 posIS, vec3 endIS, vec3 tdims)
   #if vtkBlendMode == 0 // COMPOSITE_BLEND
     // now map through opacity and color
     tColor = getColorForValue(tValue, posIS, tstep);
+    //VTK::Picking::InitRaw
 
     // handle very thin volumes
     if (raySteps <= 1.0)
     {
       tColor.a = 1.0 - pow(1.0 - tColor.a, raySteps);
       gl_FragData[0] = tColor;
+      //VTK::Picking::Exit
       return;
     }
 
     tColor.a = 1.0 - pow(1.0 - tColor.a, jitter);
     color = vec4(tColor.rgb*tColor.a, tColor.a);
+    //VTK::Picking::Init
     posIS += (jitter*stepIS);
 
     for (int i = 0; i < //VTK::MaximumSamplesValue ; ++i)
@@ -1615,6 +1624,7 @@ void applyBlend(vec3 posIS, vec3 endIS, vec3 tdims)
 
       // now map through opacity and color
       tColor = getColorForValue(tValue, posIS, tstep);
+      //VTK::Picking::LoopRaw
 
       float mix = (1.0 - color.a);
 
@@ -1623,6 +1633,7 @@ void applyBlend(vec3 posIS, vec3 endIS, vec3 tdims)
       //mix = mix * sign(max(raySteps - stepsTraveled - 1.0, 0.0));
 
       color = color + vec4(tColor.rgb*tColor.a, tColor.a)*mix;
+      //VTK::Picking::Loop
       stepsTraveled++;
       posIS += stepIS;
       if (color.a > 0.99) { color.a = 1.0; break; }
@@ -1922,7 +1933,7 @@ void main()
   vec3 tdims = vec3(volumeDimensions);
 
   // compute the start and end points for the ray
-  vec2 rayStartEndDistancesVC = computeRayDistances(rayDirVC, tdims);
+  rayStartEndDistancesVC = computeRayDistances(rayDirVC, tdims);
 
   // do we need to composite? aka does the ray have any length
   // If not, bail out early
@@ -1938,4 +1949,6 @@ void main()
 
   // Perform the blending operation along the ray
   applyBlend(posIS, endIS, tdims);
+
+  //VTK::Picking::Impl
 }

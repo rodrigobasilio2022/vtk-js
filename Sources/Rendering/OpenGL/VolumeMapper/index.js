@@ -23,6 +23,7 @@ import {
   ColorMixPreset,
 } from 'vtk.js/Sources/Rendering/Core/VolumeProperty/Constants';
 import { BlendMode } from 'vtk.js/Sources/Rendering/Core/VolumeMapper/Constants';
+import { PassTypes } from 'vtk.js/Sources/Rendering/OpenGL/HardwareSelector/Constants';
 
 import {
   getTransferFunctionHash,
@@ -117,6 +118,18 @@ function getColorCodeFromPreset(colorMixPreset) {
 }
 
 // ----------------------------------------------------------------------------
+// Helper function to get the current picking pass state
+// ----------------------------------------------------------------------------
+
+function getPickState(openGLRenderer) {
+  const selector = openGLRenderer.getSelector();
+  if (selector) {
+    return selector.getCurrentPass();
+  }
+  return PassTypes.MIN_KNOWN_PASS - 1;
+}
+
+// ----------------------------------------------------------------------------
 // vtkOpenGLVolumeMapper methods
 // ----------------------------------------------------------------------------
 
@@ -139,13 +152,25 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     model.zBufferTexture = null;
   };
 
-  // ohh someone is doing a zbuffer pass, use that for
-  // intermixed volume rendering
+  // Handle zbuffer pass - for volume picking we need to render with depth output
   publicAPI.zBufferPass = (prepass, renderPass) => {
     if (prepass) {
-      const zbt = renderPass.getZBufferTexture();
-      if (zbt !== model.zBufferTexture) {
-        model.zBufferTexture = zbt;
+      // Track that we've seen a depth request for shader generation
+      model.haveSeenDepthRequest = true;
+
+      // Check if this is for hardware selection (captureZValues)
+      const selector = model._openGLRenderer?.getSelector();
+      if (selector) {
+        // Render the volume with depth encoding for picking
+        model.renderDepth = true;
+        publicAPI.volumePass(prepass, renderPass);
+        model.renderDepth = false;
+      } else {
+        // Normal zbuffer pass - just capture the texture for intermixed rendering
+        const zbt = renderPass.getZBufferTexture();
+        if (zbt !== model.zBufferTexture) {
+          model.zBufferTexture = zbt;
+        }
       }
     }
   };
@@ -384,7 +409,7 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       ]).result;
       FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::ZBuffer::Impl', [
         'vec4 depthVec = texture2D(zBufferTexture, vec2(gl_FragCoord.x / vpZWidth, gl_FragCoord.y/vpZHeight));',
-        'float zdepth = (depthVec.r*256.0 + depthVec.g)/257.0;',
+        'float zdepth = (depthVec.r + depthVec.g * 256.0 + depthVec.b * 65536.0) / 65793.0;',
         'zdepth = zdepth * 2.0 - 1.0;',
         'if (cameraParallel == 0) {',
         'zdepth = -2.0 * camFar * camNear / (zdepth*(camFar-camNear)-(camFar+camNear)) - camNear;}',
@@ -406,6 +431,28 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
 
     publicAPI.replaceShaderLight(shaders, ren, actor);
     publicAPI.replaceShaderClippingPlane(shaders, ren, actor);
+    // replaceShaderDepth must run before replaceShaderPicking since it prepends to //VTK::Picking::Dec
+    publicAPI.replaceShaderDepth(shaders, ren, actor);
+    publicAPI.replaceShaderPicking(shaders, ren, actor);
+  };
+
+  publicAPI.replaceShaderDepth = (shaders, ren, actor) => {
+    // Add depth encoding for zBufferPass (used by HardwareSelector)
+    if (!model.haveSeenDepthRequest) {
+      return;
+    }
+
+    let FSSource = shaders.Fragment;
+
+    // When renderDepth is true, define DEPTH_REQUEST to switch to RGB-encoded depth output
+    if (model.renderDepth) {
+      FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Dec', [
+        '#define DEPTH_REQUEST',
+        '//VTK::Picking::Dec',
+      ]).result;
+    }
+
+    shaders.Fragment = FSSource;
   };
 
   publicAPI.replaceShaderLight = (shaders, ren, actor) => {
@@ -530,6 +577,171 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
     shaders.Fragment = FSSource;
   };
 
+  publicAPI.replaceShaderPicking = (shaders, ren, actor) => {
+    let FSSource = shaders.Fragment;
+
+    // Check if we are in selection mode
+    if (!model._openGLRenderer.getSelector()) {
+      // Remove placeholders when not picking
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::Dec',
+        ''
+      ).result;
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::Locals',
+        ''
+      ).result;
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::InitRaw',
+        ''
+      ).result;
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::Init',
+        ''
+      ).result;
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::LoopRaw',
+        ''
+      ).result;
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::Loop',
+        ''
+      ).result;
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::Exit',
+        ''
+      ).result;
+      FSSource = vtkShaderProgram.substitute(
+        FSSource,
+        '//VTK::Picking::Impl',
+        ''
+      ).result;
+      shaders.Fragment = FSSource;
+      return;
+    }
+
+    const picking = getPickState(model._openGLRenderer);
+    model.lastSelectionState = picking;
+
+    // Add picking declarations - including globals for tracking convergence
+    // These need to be global so main() can access them after applyBlend() returns
+    FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Dec', [
+      'uniform vec3 mapperIndex;',
+      'uniform int picking;',
+      'uniform mat4 VCPCMatrix;',
+      '// Track first visible voxel position (similar to CellPicker)',
+      'float convergenceT = -1.0;',
+      '// Opacity threshold like CellPicker (default 0.2)',
+      'float convergenceOpacityThreshold = 0.05;',
+    ]).result;
+
+    // Local variables placeholder - empty, we use globals
+    FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Locals', [
+      '',
+    ]).result;
+
+    // Track convergence at the first sample point - RAW opacity before pow
+    // This is the actual opacity from the transfer function lookup
+    // Don't check 'picking' uniform - always track when shader is built for picking
+    FSSource = vtkShaderProgram.substitute(
+      FSSource,
+      '//VTK::Picking::InitRaw',
+      [
+        '    if (tColor.a > convergenceOpacityThreshold && convergenceT < 0.0) {',
+        '      // First visible voxel found at start (before jitter step)',
+        '      convergenceT = 0.0;',
+        '    }',
+      ]
+    ).result;
+
+    // Clear the post-pow placeholder
+    FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Init', [
+      '',
+    ]).result;
+
+    // Track convergence in the ray marching loop - RAW opacity
+    // This happens right after getColorForValue, before blending
+    // At this point in the loop, posIS is at (jitter + i) steps where i is the loop iteration
+    // stepsTraveled = jitter + i (it starts as jitter and increments AFTER this point)
+    FSSource = vtkShaderProgram.substitute(
+      FSSource,
+      '//VTK::Picking::LoopRaw',
+      [
+        '      if (tColor.a > convergenceOpacityThreshold && convergenceT < 0.0) {',
+        '        // First visible voxel found at this step',
+        '        // stepsTraveled = jitter + iteration_number, gives position along ray',
+        '        convergenceT = stepsTraveled / raySteps;',
+        '      }',
+      ]
+    ).result;
+
+    // Clear the post-blend placeholder
+    FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Loop', [
+      '',
+    ]).result;
+
+    // Handle early exit for thin volumes (raySteps <= 1)
+    FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Exit', [
+      '      if (tColor.a > convergenceOpacityThreshold) {',
+      '        // Thin volume - convergence at start',
+      '        convergenceT = 0.0;',
+      '      }',
+    ]).result;
+
+    // Output picking result and depth
+    // For DEPTH_REQUEST mode (zBufferPass): always encode depth as RGB (no picking check)
+    // For regular picking mode: check picking uniform and output mapperIndex
+    FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Impl', [
+      '#ifdef DEPTH_REQUEST',
+      '  // zBufferPass: Compute and encode depth for first visible voxel',
+      '  {',
+      '    float totalDist = rayStartEndDistancesVC.y - rayStartEndDistancesVC.x;',
+      '    float hitDistance = rayStartEndDistancesVC.x;',
+      '    if (convergenceT >= 0.0) {',
+      '      hitDistance = rayStartEndDistancesVC.x + convergenceT * totalDist;',
+      '    }',
+      '    vec3 hitPointVC = vertexVCVSOutput + hitDistance * rayDirVC;',
+      '    vec4 hitPointPC = VCPCMatrix * vec4(hitPointVC, 1.0);',
+      '    float convergenceDepth = (hitPointPC.z / hitPointPC.w) * 0.5 + 0.5;',
+      '    // Set gl_FragDepth for proper depth testing against other geometry',
+      '    gl_FragDepth = convergenceDepth;',
+      '    // If no visible voxel hit, discard this fragment to not overwrite other geometry',
+      '    if (convergenceT < 0.0) {',
+      '      discard;',
+      '    }',
+      '    float iz = floor(convergenceDepth * 16777215.0 + 0.5);',
+      '    float rf = mod(iz, 256.0) / 255.0;',
+      '    float gf = mod(floor(iz / 256.0), 256.0) / 255.0;',
+      '    float bf = floor(iz / 65536.0) / 255.0;',
+      '    gl_FragData[0] = vec4(rf, gf, bf, 1.0);',
+      '  }',
+      '#else',
+      '  if (picking != 0) {',
+      '    // Regular picking - compute depth and output mapperIndex',
+      '    float totalDist = rayStartEndDistancesVC.y - rayStartEndDistancesVC.x;',
+      '    float hitDistance = rayStartEndDistancesVC.x;',
+      '    if (convergenceT >= 0.0) {',
+      '      hitDistance = rayStartEndDistancesVC.x + convergenceT * totalDist;',
+      '    }',
+      '    vec3 hitPointVC = vertexVCVSOutput + hitDistance * rayDirVC;',
+      '    vec4 hitPointPC = VCPCMatrix * vec4(hitPointVC, 1.0);',
+      '    float convergenceDepth = (hitPointPC.z / hitPointPC.w) * 0.5 + 0.5;',
+      '    gl_FragData[0] = vec4(mapperIndex, 1.0);',
+      '    gl_FragDepth = convergenceDepth;',
+      '  }',
+      '#endif',
+    ]).result;
+
+    shaders.Fragment = FSSource;
+  };
+
   const recomputeLightComplexity = (actor, lights) => {
     // do we need lighting?
     let lightComplexity = 0;
@@ -598,6 +810,9 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
 
     const hasZBufferTexture = !!model.zBufferTexture;
 
+    // Check if we are in selection mode
+    const pickingState = getPickState(model._openGLRenderer);
+
     const state = {
       iComps: actorProps.getIndependentComponents(),
       colorMixPreset: actorProps.getColorMixPreset(),
@@ -610,6 +825,9 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       hasZBufferTexture,
       opacityModes,
       forceNearestInterps,
+      pickingState,
+      renderDepth: model.renderDepth,
+      haveSeenDepthRequest: model.haveSeenDepthRequest,
     };
 
     // We need to rebuild the shader if one of these variables has changed,
@@ -750,6 +968,18 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         : model._openGLRenderWindow.getFramebufferSize();
       program.setUniformf('vpZWidth', size[0]);
       program.setUniformf('vpZHeight', size[1]);
+    }
+
+    // Set picking uniforms if selector is active
+    const selector = model._openGLRenderer.getSelector();
+    if (selector) {
+      program.setUniformi('picking', 1);
+      program.setUniform3fArray('mapperIndex', selector.getPropColorValue());
+      // Always set the view to projection matrix for depth computation
+      const keyMats = model.openGLCamera.getKeyMatrices(ren);
+      program.setUniformMatrix('VCPCMatrix', keyMats.vcpc);
+    } else {
+      program.setUniformi('picking', 0);
     }
   };
 
@@ -1265,6 +1495,19 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.renderPieceStart = (ren, actor) => {
     const rwi = ren.getVTKWindow().getInteractor();
 
+    // Handle hardware selection
+    const selector = model._openGLRenderer.getSelector();
+    if (selector) {
+      const picking = getPickState(model._openGLRenderer);
+      if (model.lastSelectionState !== picking) {
+        model.lastSelectionState = picking;
+      }
+      switch (picking) {
+        default:
+          selector.renderProp(actor);
+      }
+    }
+
     if (!model._lastScale) {
       model._lastScale = model.renderable.getInitialInteractionScale();
     }
@@ -1338,7 +1581,14 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         model._smallViewportHeight / size[1],
       ];
     }
-    model.context.disable(model.context.DEPTH_TEST);
+
+    // For depth rendering (picking), enable depth test so we properly compare
+    // against other geometry. For normal volume rendering, disable depth test.
+    if (model.renderDepth) {
+      model.context.enable(model.context.DEPTH_TEST);
+    } else {
+      model.context.disable(model.context.DEPTH_TEST);
+    }
 
     // make sure the BOs are up to date
     publicAPI.updateBufferObjects(ren, actor);
@@ -1951,6 +2201,9 @@ const DEFAULT_VALUES = {
   projectionToView: null,
   avgWindowArea: 0.0,
   avgFrameTime: 0.0,
+  lastSelectionState: -1,
+  haveSeenDepthRequest: false,
+  renderDepth: false,
   // _scalars: null,
   // _scalarOpacityFunc: null,
   // _colorTransferFunc: null,

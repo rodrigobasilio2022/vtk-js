@@ -52,7 +52,7 @@ function vtkOpenGLRenderer(publicAPI, model) {
       let clearMask = 0;
       const gl = model.context;
       if (!model.renderable.getTransparent()) {
-        model.context.clearColor(1.0, 0.0, 0.0, 1.0);
+        model.context.clearColor(1.0, 1.0, 1.0, 1.0);
         clearMask |= gl.COLOR_BUFFER_BIT;
       }
 
