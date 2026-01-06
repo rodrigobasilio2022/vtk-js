@@ -1485,7 +1485,7 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
   publicAPI.getCurrentSampleDistance = (ren) => {
     const rwi = ren.getVTKWindow().getInteractor();
     const baseSampleDistance = model.renderable.getSampleDistance();
-    if (rwi.isAnimating()) {
+    if (rwi && rwi.isAnimating()) {
       const factor = model.renderable.getInteractionSampleDistanceFactor();
       return baseSampleDistance * factor;
     }
@@ -1512,11 +1512,11 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       model._lastScale = model.renderable.getInitialInteractionScale();
     }
     model._useSmallViewport = false;
-    if (rwi.isAnimating() && model._lastScale > 1.5) {
+    if (rwi && rwi.isAnimating() && model._lastScale > 1.5) {
       model._useSmallViewport = true;
     }
 
-    if (!model._animationRateSubscription) {
+    if (rwi && !model._animationRateSubscription) {
       // when the animation frame rate changes recompute the scale factor
       model._animationRateSubscription = rwi.onAnimationFrameRateUpdate(() => {
         if (model.renderable.getAutoAdjustSampleDistances()) {
