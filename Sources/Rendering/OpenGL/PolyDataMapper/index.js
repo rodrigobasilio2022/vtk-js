@@ -73,7 +73,7 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
     }
   };
 
-  publicAPI.zBufferPass = (prepass, renderPass) => {
+  publicAPI.zBufferPass = (prepass) => {
     if (prepass) {
       model.haveSeenDepthRequest = true;
       model.renderDepth = true;
@@ -82,8 +82,7 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
     }
   };
 
-  publicAPI.opaqueZBufferPass = (prepass, renderPass) =>
-    publicAPI.zBufferPass(prepass, renderPass);
+  publicAPI.opaqueZBufferPass = (prepass) => publicAPI.zBufferPass(prepass);
 
   publicAPI.opaquePass = (prepass) => {
     if (prepass) {
@@ -903,10 +902,7 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
       selector.getFieldAssociation() ===
         FieldAssociations.FIELD_ASSOCIATION_POINTS
     ) {
-      const picking = getPickState(model._openGLRenderer);
-      if (picking === PassTypes.ID_LOW24 || picking === PassTypes.ID_HIGH24) {
-        cp.offset -= 2.0;
-      }
+      cp.offset -= 2.0;
     }
     return cp;
   };
