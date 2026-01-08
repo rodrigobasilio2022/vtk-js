@@ -409,7 +409,10 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       ]).result;
       FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::ZBuffer::Impl', [
         'vec4 depthVec = texture2D(zBufferTexture, vec2(gl_FragCoord.x / vpZWidth, gl_FragCoord.y/vpZHeight));',
-        'float zdepth = (depthVec.r + depthVec.g * 256.0 + depthVec.b * 65536.0) / 65793.0;',
+        // Decode 24-bit RGB-encoded depth (matches PolyDataMapper encoding)
+        // Encoding: iz = depth * 16777215, R = bits 0-7, G = bits 8-15, B = bits 16-23
+        'float iz = depthVec.r * 255.0 + depthVec.g * 255.0 * 256.0 + depthVec.b * 255.0 * 65536.0;',
+        'float zdepth = iz / 16777215.0;',
         'zdepth = zdepth * 2.0 - 1.0;',
         'if (cameraParallel == 0) {',
         'zdepth = -2.0 * camFar * camNear / (zdepth*(camFar-camNear)-(camFar+camNear)) - camNear;}',
@@ -638,8 +641,16 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       'uniform mat4 VCPCMatrix;',
       '// Track first visible voxel position (similar to CellPicker)',
       'float convergenceT = -1.0;',
-      '// Opacity threshold like CellPicker (default 0.2)',
-      'float convergenceOpacityThreshold = 0.05;',
+      '// Accumulated opacity at the convergence point - used to determine if volume is actually visible',
+      'float convergenceAccumulatedOpacity = 0.0;',
+      '// Opacity threshold for a single voxel to be considered visible (like CellPicker)',
+      '// Use a higher threshold (0.2) to avoid picking nearly-transparent areas',
+      'float convergenceOpacityThreshold = 0.2;',
+      '// Minimum accumulated opacity required for the volume to be pickable',
+      '// This prevents picking in areas where the volume is too transparent overall',
+      'float convergenceMinAccumulatedOpacity = 0.1;',
+
+      'const float depthBias = 0.00001;',
     ]).result;
 
     // Local variables placeholder - empty, we use globals
@@ -657,6 +668,8 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         '    if (tColor.a > convergenceOpacityThreshold && convergenceT < 0.0) {',
         '      // First visible voxel found at start (before jitter step)',
         '      convergenceT = 0.0;',
+        '      // At the start, accumulated opacity is just this voxel (will be adjusted by jitter)',
+        '      convergenceAccumulatedOpacity = tColor.a;',
         '    }',
       ]
     ).result;
@@ -678,6 +691,9 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
         '        // First visible voxel found at this step',
         '        // stepsTraveled = jitter + iteration_number, gives position along ray',
         '        convergenceT = stepsTraveled / raySteps;',
+        '        // Record the accumulated opacity at this point (color.a is from previous steps)',
+        '        // Add the current voxel contribution: color.a + tColor.a * (1.0 - color.a)',
+        '        convergenceAccumulatedOpacity = color.a + tColor.a * (1.0 - color.a);',
         '      }',
       ]
     ).result;
@@ -689,9 +705,11 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
 
     // Handle early exit for thin volumes (raySteps <= 1)
     FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::Picking::Exit', [
-      '      if (tColor.a > convergenceOpacityThreshold) {',
+      '      if (tColor.a > convergenceOpacityThreshold && convergenceT < 0.0 && raySteps <= 1.0) {',
       '        // Thin volume - convergence at start',
       '        convergenceT = 0.0;',
+      '        // For thin volumes, the accumulated opacity is the adjusted tColor.a',
+      '        convergenceAccumulatedOpacity = tColor.a;',
       '      }',
     ]).result;
 
@@ -702,20 +720,22 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       '#ifdef DEPTH_REQUEST',
       '  // zBufferPass: Compute and encode depth for first visible voxel',
       '  {',
-      '    float totalDist = rayStartEndDistancesVC.y - rayStartEndDistancesVC.x;',
-      '    float hitDistance = rayStartEndDistancesVC.x;',
-      '    if (convergenceT >= 0.0) {',
-      '      hitDistance = rayStartEndDistancesVC.x + convergenceT * totalDist;',
-      '    }',
-      '    vec3 hitPointVC = vertexVCVSOutput + hitDistance * rayDirVC;',
-      '    vec4 hitPointPC = VCPCMatrix * vec4(hitPointVC, 1.0);',
-      '    float convergenceDepth = (hitPointPC.z / hitPointPC.w) * 0.5 + 0.5;',
-      '    // Set gl_FragDepth for proper depth testing against other geometry',
-      '    gl_FragDepth = convergenceDepth;',
       '    // If no visible voxel hit, discard this fragment to not overwrite other geometry',
       '    if (convergenceT < 0.0) {',
       '      discard;',
       '    }',
+      '    // Also discard if accumulated opacity is too low - prevents picking in nearly transparent areas',
+      '    if (convergenceAccumulatedOpacity < convergenceMinAccumulatedOpacity) {',
+      '      discard;',
+      '    }',
+      '    float totalDist = rayStartEndDistancesVC.y - rayStartEndDistancesVC.x;',
+      '    float hitDistance = rayStartEndDistancesVC.x + convergenceT * totalDist;',
+      '    vec3 hitPointVC = vertexVCVSOutput + hitDistance * rayDirVC;',
+      '    vec4 hitPointPC = VCPCMatrix * vec4(hitPointVC, 1.0);',
+      '    float convergenceDepth = (hitPointPC.z / hitPointPC.w) * 0.5 + 0.5;',
+      '    // Set gl_FragDepth for proper depth testing against other geometry',
+      '    // pushes the volume sligthly forward to avoid z-fighting',
+      '    gl_FragDepth = clamp(convergenceDepth + depthBias, 0.0, 1.0);',
       '    float iz = floor(convergenceDepth * 16777215.0 + 0.5);',
       '    float rf = mod(iz, 256.0) / 255.0;',
       '    float gf = mod(floor(iz / 256.0), 256.0) / 255.0;',
@@ -725,16 +745,18 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       '#else',
       '  if (picking != 0) {',
       '    // Regular picking - compute depth and output mapperIndex',
-      '    float totalDist = rayStartEndDistancesVC.y - rayStartEndDistancesVC.x;',
-      '    float hitDistance = rayStartEndDistancesVC.x;',
-      '    if (convergenceT >= 0.0) {',
-      '      hitDistance = rayStartEndDistancesVC.x + convergenceT * totalDist;',
+      '    // Skip picking if no visible voxel or accumulated opacity too low',
+      '    if (convergenceT < 0.0 || convergenceAccumulatedOpacity < convergenceMinAccumulatedOpacity) {',
+      '      discard;',
       '    }',
+      '    float totalDist = rayStartEndDistancesVC.y - rayStartEndDistancesVC.x;',
+      '    float hitDistance = rayStartEndDistancesVC.x + convergenceT * totalDist;',
       '    vec3 hitPointVC = vertexVCVSOutput + hitDistance * rayDirVC;',
       '    vec4 hitPointPC = VCPCMatrix * vec4(hitPointVC, 1.0);',
       '    float convergenceDepth = (hitPointPC.z / hitPointPC.w) * 0.5 + 0.5;',
+      '    // pushes the volume sligthly forward to avoid z-fighting',
+      '    gl_FragDepth = clamp(convergenceDepth + depthBias, 0.0, 1.0);',
       '    gl_FragData[0] = vec4(mapperIndex, 1.0);',
-      '    gl_FragDepth = convergenceDepth;',
       '  }',
       '#endif',
     ]).result;

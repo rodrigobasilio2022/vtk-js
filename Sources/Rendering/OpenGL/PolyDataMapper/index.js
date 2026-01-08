@@ -948,14 +948,44 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
         FSSource = vtkShaderProgram.substitute(
           FSSource,
           '//VTK::Picking::Impl',
-          '  gl_FragData[0] = vec4(float(idx%256)/255.0, float((idx/256)%256)/255.0, float((idx/65536)%256)/255.0, 1.0);'
+          [
+            '  gl_FragData[0] = vec4(float(idx%256)/255.0, float((idx/256)%256)/255.0, float((idx/65536)%256)/255.0, 1.0);',
+            '  // Write depth for proper depth testing with volumes',
+            '#ifdef VTK_COINCIDENT_OFFSET',
+            '  float cvalue = 0.0;',
+            '  #ifdef VTK_COINCIDENT_FACTOR',
+            '    float cscaleZ = length(vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)));',
+            '    cvalue = cfactor*cscaleZ + 0.000016*coffset;',
+            '  #else',
+            '    cvalue = 0.000016*coffset;',
+            '  #endif',
+            '#else',
+            '  float cvalue = 0.0;',
+            '#endif',
+            '  gl_FragDepth = clamp(gl_FragCoord.z + cvalue, 0.0, 1.0);',
+          ]
         ).result;
         break;
       case PassTypes.ID_HIGH24:
         FSSource = vtkShaderProgram.substitute(
           FSSource,
           '//VTK::Picking::Impl',
-          '  gl_FragData[0] = vec4(float((idx/16777216)%256)/255.0, 0.0, 0.0, 1.0);'
+          [
+            '  gl_FragData[0] = vec4(float((idx/16777216)%256)/255.0, 0.0, 0.0, 1.0);',
+            '  // Write depth for proper depth testing with volumes',
+            '#ifdef VTK_COINCIDENT_OFFSET',
+            '  float cvalue = 0.0;',
+            '  #ifdef VTK_COINCIDENT_FACTOR',
+            '    float cscaleZ = length(vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)));',
+            '    cvalue = cfactor*cscaleZ + 0.000016*coffset;',
+            '  #else',
+            '    cvalue = 0.000016*coffset;',
+            '  #endif',
+            '#else',
+            '  float cvalue = 0.0;',
+            '#endif',
+            '  gl_FragDepth = clamp(gl_FragCoord.z + cvalue, 0.0, 1.0);',
+          ]
         ).result;
         break;
       default:
@@ -967,7 +997,24 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
         FSSource = vtkShaderProgram.substitute(
           FSSource,
           '//VTK::Picking::Impl',
-          '  gl_FragData[0] = picking != 0 ? vec4(mapperIndex,1.0) : gl_FragData[0];'
+          [
+            '  gl_FragData[0] = picking != 0 ? vec4(mapperIndex,1.0) : gl_FragData[0];',
+            '  // Write depth for proper depth testing with volumes',
+            '  if (picking != 0) {',
+            '#ifdef VTK_COINCIDENT_OFFSET',
+            '    float cvalue = 0.0;',
+            '    #ifdef VTK_COINCIDENT_FACTOR',
+            '      float cscaleZ = length(vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)));',
+            '      cvalue = cfactor*cscaleZ + 0.000016*coffset;',
+            '    #else',
+            '      cvalue = 0.000016*coffset;',
+            '    #endif',
+            '#else',
+            '    float cvalue = 0.0;',
+            '#endif',
+            '    gl_FragDepth = clamp(gl_FragCoord.z + cvalue, 0.0, 1.0);',
+            '  }',
+          ]
         ).result;
     }
     shaders.Fragment = FSSource;
