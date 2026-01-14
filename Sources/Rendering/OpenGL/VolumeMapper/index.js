@@ -687,13 +687,14 @@ function vtkOpenGLVolumeMapper(publicAPI, model) {
       FSSource,
       '//VTK::Picking::LoopRaw',
       [
-        '      if (tColor.a > convergenceOpacityThreshold && convergenceT < 0.0) {',
-        '        // First visible voxel found at this step',
+        '      // Calculate what accumulated opacity will be after blending this voxel',
+        '      float accumulatedOpacity = color.a + tColor.a * (1.0 - color.a);',
+        '      if (accumulatedOpacity > convergenceOpacityThreshold && convergenceT < 0.0) {',
+        '        // First point where accumulated opacity crosses threshold',
         '        // stepsTraveled = jitter + iteration_number, gives position along ray',
         '        convergenceT = stepsTraveled / raySteps;',
-        '        // Record the accumulated opacity at this point (color.a is from previous steps)',
-        '        // Add the current voxel contribution: color.a + tColor.a * (1.0 - color.a)',
-        '        convergenceAccumulatedOpacity = color.a + tColor.a * (1.0 - color.a);',
+        '        // Record the accumulated opacity at this point',
+        '        convergenceAccumulatedOpacity = accumulatedOpacity;',
         '      }',
       ]
     ).result;
