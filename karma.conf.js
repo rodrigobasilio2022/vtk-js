@@ -77,6 +77,10 @@ module.exports = function init(config) {
 
     junitReporter: {
       outputDir: 'Utilities/TestResults',
+      // Keep this defined to avoid reporter edge-cases.
+      properties: {},
+      // Use the newer schema to avoid embedding raw browser logs into XML.
+      xmlVersion: 1,
     },
 
     client: {
@@ -98,7 +102,8 @@ module.exports = function init(config) {
     browserDisconnectTolerance: 3,
 
     port: 9876,
-    colors: true,
+    // Color codes end up in junitReporter system-out and break XML generation.
+    colors: false,
     logLevel: config.LOG_INFO,
     autoWatch: true,
     browsers: ['Chrome'],

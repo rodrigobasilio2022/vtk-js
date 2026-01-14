@@ -19,7 +19,12 @@ function implementReplaceShaderCoincidentOffset(
       FSSource = vtkShaderProgram.substitute(
         FSSource,
         '//VTK::Coincident::Dec',
-        ['uniform float cfactor;', 'uniform float coffset;']
+        [
+          '#define VTK_COINCIDENT_OFFSET 1',
+          ...(cp.factor !== 0.0 ? ['#define VTK_COINCIDENT_FACTOR 1'] : []),
+          'uniform float cfactor;',
+          'uniform float coffset;',
+        ]
       ).result;
 
       if (model.context.getExtension('EXT_frag_depth')) {

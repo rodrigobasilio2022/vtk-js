@@ -948,14 +948,44 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
         FSSource = vtkShaderProgram.substitute(
           FSSource,
           '//VTK::Picking::Impl',
-          '  gl_FragData[0] = vec4(float(idx%256)/255.0, float((idx/256)%256)/255.0, float((idx/65536)%256)/255.0, 1.0);'
+          [
+            '  gl_FragData[0] = vec4(float(idx%256)/255.0, float((idx/256)%256)/255.0, float((idx/65536)%256)/255.0, 1.0);',
+            '  // Write depth for proper depth testing with volumes',
+            '#ifdef VTK_COINCIDENT_OFFSET',
+            '  float cvalue = 0.0;',
+            '  #ifdef VTK_COINCIDENT_FACTOR',
+            '    float cscaleZ = length(vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)));',
+            '    cvalue = cfactor*cscaleZ + 0.000016*coffset;',
+            '  #else',
+            '    cvalue = 0.000016*coffset;',
+            '  #endif',
+            '#else',
+            '  float cvalue = 0.0;',
+            '#endif',
+            '  gl_FragDepth = clamp(gl_FragCoord.z + cvalue, 0.0, 1.0);',
+          ]
         ).result;
         break;
       case PassTypes.ID_HIGH24:
         FSSource = vtkShaderProgram.substitute(
           FSSource,
           '//VTK::Picking::Impl',
-          '  gl_FragData[0] = vec4(float((idx/16777216)%256)/255.0, 0.0, 0.0, 1.0);'
+          [
+            '  gl_FragData[0] = vec4(float((idx/16777216)%256)/255.0, 0.0, 0.0, 1.0);',
+            '  // Write depth for proper depth testing with volumes',
+            '#ifdef VTK_COINCIDENT_OFFSET',
+            '  float cvalue = 0.0;',
+            '  #ifdef VTK_COINCIDENT_FACTOR',
+            '    float cscaleZ = length(vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)));',
+            '    cvalue = cfactor*cscaleZ + 0.000016*coffset;',
+            '  #else',
+            '    cvalue = 0.000016*coffset;',
+            '  #endif',
+            '#else',
+            '  float cvalue = 0.0;',
+            '#endif',
+            '  gl_FragDepth = clamp(gl_FragCoord.z + cvalue, 0.0, 1.0);',
+          ]
         ).result;
         break;
       default:
@@ -967,7 +997,24 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
         FSSource = vtkShaderProgram.substitute(
           FSSource,
           '//VTK::Picking::Impl',
-          '  gl_FragData[0] = picking != 0 ? vec4(mapperIndex,1.0) : gl_FragData[0];'
+          [
+            '  gl_FragData[0] = picking != 0 ? vec4(mapperIndex,1.0) : gl_FragData[0];',
+            '  // Write depth for proper depth testing with volumes',
+            '  if (picking != 0) {',
+            '#ifdef VTK_COINCIDENT_OFFSET',
+            '    float cvalue = 0.0;',
+            '    #ifdef VTK_COINCIDENT_FACTOR',
+            '      float cscaleZ = length(vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)));',
+            '      cvalue = cfactor*cscaleZ + 0.000016*coffset;',
+            '    #else',
+            '      cvalue = 0.000016*coffset;',
+            '    #endif',
+            '#else',
+            '    float cvalue = 0.0;',
+            '#endif',
+            '    gl_FragDepth = clamp(gl_FragCoord.z + cvalue, 0.0, 1.0);',
+            '  }',
+          ]
         ).result;
     }
     shaders.Fragment = FSSource;
@@ -993,10 +1040,22 @@ function vtkOpenGLPolyDataMapper(publicAPI, model) {
       ).result;
       FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::ZBuffer::Impl', [
         'if (depthRequest == 1) {',
-        'float iz = floor(gl_FragCoord.z*65535.0 + 0.1);',
-        'float rf = floor(iz/256.0)/255.0;',
-        'float gf = mod(iz,256.0)/255.0;',
-        'gl_FragData[0] = vec4(rf, gf, 0.0, 1.0); }',
+        '#ifdef VTK_COINCIDENT_OFFSET',
+        '  float cvalue = 0.0;',
+        '  #ifdef VTK_COINCIDENT_FACTOR',
+        '    float cscaleZ = length(vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)));',
+        '    cvalue = cfactor*cscaleZ + 0.000016*coffset;',
+        '  #else',
+        '    cvalue = 0.000016*coffset;',
+        '  #endif',
+        '#else',
+        '  float cvalue = 0.0;',
+        '#endif',
+        'float iz = floor((gl_FragCoord.z + cvalue)*16777215.0 + 0.5);',
+        'float rf = mod(iz,256.0)/255.0;',
+        'float gf = mod(floor(iz/256.0),256.0)/255.0;',
+        'float bf = floor(iz/65536.0)/255.0;',
+        'gl_FragData[0] = vec4(rf, gf, bf, 1.0); }',
       ]).result;
       shaders.Fragment = FSSource;
     }
