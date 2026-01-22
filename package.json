@@ -29,6 +29,15 @@
   "homepage": "https://github.com/kitware/vtk-js#readme",
   "main": "./dist/umd/vtk.js",
   "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/umd/vtk.js"
+    },
+    "./package.json": "./package.json"
+  },
   "dependencies": {
     "@babel/runtime": "7.22.11",
     "@types/webxr": "^0.5.5",
