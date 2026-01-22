@@ -158,14 +158,15 @@ function vtkOpenGLStickMapper(publicAPI, model) {
     ).result;
 
     if (model.haveSeenDepthRequest) {
-      // special depth impl
+      // special depth impl - use 24-bit encoding for consistency with HardwareSelector
       FSSource = vtkShaderProgram.substitute(FSSource, '//VTK::ZBuffer::Impl', [
         'if (depthRequest == 1) {',
         'float computedZ = (pos.z / pos.w + 1.0) / 2.0;',
-        'float iz = floor(computedZ * 65535.0 + 0.1);',
-        'float rf = floor(iz/256.0)/255.0;',
-        'float gf = mod(iz,256.0)/255.0;',
-        'gl_FragData[0] = vec4(rf, gf, 0.0, 1.0); }',
+        'float iz = floor(computedZ * 16777215.0 + 0.5);',
+        'float rf = mod(iz, 256.0) / 255.0;',
+        'float gf = mod(floor(iz / 256.0), 256.0) / 255.0;',
+        'float bf = floor(iz / 65536.0) / 255.0;',
+        'gl_FragData[0] = vec4(rf, gf, bf, 1.0); }',
       ]).result;
     }
 

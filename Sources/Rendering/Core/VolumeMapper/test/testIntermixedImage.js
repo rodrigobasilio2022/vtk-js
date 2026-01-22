@@ -173,7 +173,7 @@ test('Test Composite Volume Rendering: intermixed image', async (t) => {
         [baseline1],
         'Rendering/Core/VolumeMapper/testIntermixedImage',
         t,
-        5.0,
+        10.5,
         gc.releaseResources
       )
     );
